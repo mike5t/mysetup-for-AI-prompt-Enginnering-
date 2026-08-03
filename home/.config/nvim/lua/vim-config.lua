@@ -1,0 +1,11 @@
+vim.g.mapleader = " " -- Set leader to space
+vim.opt.expandtab = true
+vim.opt.shiftwidth = 2
+vim.opt.tabstop = 2
+vim.opt.number = true
+vim.opt.relativenumber = true
+vim.opt.ignorecase = true
+vim.opt.smartcase = true
+vim.opt.clipboard = "unnamedplus" -- Use system clipboard
+vim.opt.scrolloff = 16 -- Keep 16 lines visible when scrolling
+vim.opt.undofile = true -- Persistent undo across sessions

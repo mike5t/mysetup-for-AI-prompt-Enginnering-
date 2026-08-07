@@ -1,11 +1,19 @@
-{ config, pkgs, ... }:
+{ config, pkgs, herdr, firstmate, ... }:
 let
   dotfiles = "${config.home.homeDirectory}/.dotfiles";
+  herdrPackage = herdr.packages.${pkgs.system}.default;
 in
 {
   home.username = "miket5";
   home.homeDirectory = "/home/miket5";
   home.stateVersion = "24.11";
+
+  # Keep Homebrew tools available; Herdr itself is declared below from its
+  # upstream flake and is shadowed into ~/.local/bin ahead of Homebrew.
+  home.sessionPath = [
+    "/home/linuxbrew/.linuxbrew/bin"
+    "/home/linuxbrew/.linuxbrew/sbin"
+  ];
 
   home.packages = with pkgs; [
     neovim
@@ -13,7 +21,6 @@ in
     ripgrep
     starship
     wezterm
-    zellij
     fd
     jq
     bat
@@ -22,7 +29,17 @@ in
     shellcheck
     shfmt
     tree
+    herdrPackage
   ];
+
+  # Herdr is also installed by Homebrew on this machine. This link makes the
+  # Nix-declared build take precedence without removing the Homebrew formula.
+  home.file.".local/bin/herdr".source = "${herdrPackage}/bin/herdr";
+
+  # Firstmate is a repository/distro, not a standalone executable. Keep a
+  # pinned, reproducible source snapshot in the Home Manager profile while
+  # leaving the live ~/github/firstmate checkout untouched.
+  home.file.".local/share/firstmate-source".source = firstmate;
 
   programs.zsh = {
     enable = true;
@@ -60,6 +77,8 @@ in
     config.lib.file.mkOutOfStoreSymlink "${dotfiles}/home/AGENTS.md";
   home.file.".cursorrules".source =
     config.lib.file.mkOutOfStoreSymlink "${dotfiles}/home/AGENTS.md";
+  home.file.".pi/agent/AGENTS.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${dotfiles}/home/agents.md";
 
   programs.home-manager.enable = true;
 }

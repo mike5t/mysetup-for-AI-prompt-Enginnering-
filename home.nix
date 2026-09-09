@@ -1,15 +1,16 @@
-{ config, pkgs, herdr, firstmate, ... }:
+{ config, pkgs, firstmate, ... }:
 let
   dotfiles = "${config.home.homeDirectory}/.dotfiles";
-  herdrPackage = herdr.packages.${pkgs.system}.default;
 in
 {
   home.username = "miket5";
   home.homeDirectory = "/home/miket5";
   home.stateVersion = "24.11";
 
-  # Keep Homebrew tools available; Herdr itself is declared below from its
-  # upstream flake and is shadowed into ~/.local/bin ahead of Homebrew.
+  # Keep Homebrew tools available. Herdr is managed by Homebrew only (see
+  # below): the previous Nix-declared build is removed because running a
+  # Nix 0.8.0 server alongside the Homebrew 0.9.0 client caused a client/
+  # server protocol mismatch (22 vs 19) that made agents stop the server.
   home.sessionPath = [
     "/home/linuxbrew/.linuxbrew/bin"
     "/home/linuxbrew/.linuxbrew/sbin"
@@ -29,12 +30,13 @@ in
     shellcheck
     shfmt
     tree
-    herdrPackage
   ];
 
-  # Herdr is also installed by Homebrew on this machine. This link makes the
-  # Nix-declared build take precedence without removing the Homebrew formula.
-  home.file.".local/bin/herdr".source = "${herdrPackage}/bin/herdr";
+  # Herdr is installed by Homebrew (Cellar 0.9.0). Keeping a single install
+  # avoids client/server version skew, so do not re-add the Nix build here.
+  # ~/.local/bin/herdr is manually symlinked to the Homebrew binary.
+  home.file.".local/bin/herdr".source =
+    config.lib.file.mkOutOfStoreSymlink "/home/linuxbrew/.linuxbrew/bin/herdr";
 
   # Firstmate is a repository/distro, not a standalone executable. Keep a
   # pinned, reproducible source snapshot in the Home Manager profile while

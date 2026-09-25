@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# fm-chromium-libs - durable, user-space headless-browser runtime setup.
+#
+# Problem this solves
+# -------------------
+# Ubuntu 24.04 in WSL without working passwordless sudo. The Playwright
+# Chromium builds under ~/.cache/ms-playwright need shared libraries that are
+# not part of the base image (libnss3, libnspr4, libasound2). Installing them
+# system-wide needs root, and extracting debs into /tmp does not survive a
+# reboot. This script downloads the .deb files with `apt-get download` (no
+# root), extracts them with `dpkg -x` into a persistent directory under
+# ~/.local/share/chromium-libs, and verifies with ldd that the browsers load.
+#
+# It also repairs the user-space chrome-devtools-axi setup this machine needs:
+#   * a pinned chrome-devtools-mcp under ~/.local/share/fm-chromium/mcp,
+#   * a current chrome-devtools-axi under ~/.local/share/fm-chromium/axi,
+#   * ~/.local/bin/fm-chromium-mcp, a launcher that gives the MCP
+#     --executablePath to the Playwright Chromium and re-injects
+#     LD_LIBRARY_PATH (the MCP SDK strips it from child processes),
+#   * ~/.local/bin/chrome-devtools-axi pointing at the user-space copy.
+#
+# Usage
+# -----
+#   fm-chromium-libs              ensure libraries and tools (idempotent)
+#   fm-chromium-libs --check      verify only, non-zero exit if broken
+#   fm-chromium-libs --print-env  print the LD_LIBRARY_PATH value
+#   fm-chromium-libs --wire       ensure everything, then (re)install the
+#                                 marker-delimited shell-profile block
+#   fm-chromium-libs --libs-only  only the shared-library directory
+#   fm-chromium-libs --refresh    re-download the .deb packages
+#
+# Everything this script writes lives under ~/.local, except the shell-profile
+# block added by --wire, which is fenced by clear markers and can be removed
+# by deleting the block (or by re-running --wire after moving the script away).
+#
+# Manual removal: delete the marker block from ~/.profile and ~/.bashrc,
+# then rm -rf ~/.local/share/chromium-libs ~/.local/share/fm-chromium
+#              ~/.local/bin/fm-chromium-libs ~/.local/bin/fm-chromium-mcp
+#              ~/.local/bin/chrome-devtools-axi
+#
+# This script never uses sudo, never writes outside $HOME/.local (and the
+# fenced profile block), and never touches /tmp for persistent state.
+
+set -euo pipefail
+
+HOME_DIR="${HOME:?}"
+LIBROOT="${FM_CHROMIUM_LIBROOT:-$HOME_DIR/.local/share/chromium-libs}"
+TOOLROOT="${FM_CHROMIUM_TOOLROOT:-$HOME_DIR/.local/share/fm-chromium}"
+BINDIR="${FM_CHROMIUM_BINDIR:-$HOME_DIR/.local/bin}"
+DEB_DIR="$LIBROOT/.debs"
+PLAYWRIGHT_ROOT="${FM_PLAYWRIGHT_ROOT:-$HOME_DIR/.cache/ms-playwright}"
+MCP_VERSION="${FM_CHROMIUM_MCP_VERSION:-1.9.0}"
+AXI_VERSION="${FM_CHROMIUM_AXI_VERSION:-0.1.34}"
+LIB_RUNTIME_DIR="$LIBROOT/usr/lib/x86_64-linux-gnu"
+MCP_JS="$TOOLROOT/mcp/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+AXI_JS="$TOOLROOT/axi/node_modules/chrome-devtools-axi/dist/bin/chrome-devtools-axi.js"
+MARK_START="# >>> fm-chromium-libs wiring >>>"
+MARK_END="# <<< fm-chromium-libs wiring <<<"
+
+PACKAGES=(
+  libnss3
+  libnspr4
+  libasound2t64
+  libasound2-data
+)
+
+log() { printf 'fm-chromium-libs: %s\n' "$*" >&2; }
+die() {
+  printf 'fm-chromium-libs: error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---------------------------------------------------------------- libraries
+
+# Every directory under LIBROOT that currently holds extracted shared objects.
+lib_dirs() {
+  if [ -d "$LIBROOT" ]; then
+    find "$LIBROOT" -type f -name '*.so*' -printf '%h\n' 2>/dev/null | sort -u
+  fi
+}
+
+# Colon-joined LD_LIBRARY_PATH value for the extracted libraries.
+lib_path_env_value() {
+  local dir out=""
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    if [ -z "$out" ]; then
+      out="$dir"
+    else
+      out="$out:$dir"
+    fi
+  done <<<"$(lib_dirs)"
+  printf '%s' "$out"
+}
+
+# Playwright browser executables present on this machine.
+browser_bins() {
+  local pattern
+  for pattern in \
+    "$PLAYWRIGHT_ROOT"/chromium-*/chrome-linux64/chrome \
+    "$PLAYWRIGHT_ROOT"/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell; do
+    [ -x "$pattern" ] && printf '%s\n' "$pattern"
+  done
+  return 0
+}
+
+# Sonames ldd cannot resolve for any browser binary, given a library path.
+missing_sonames() {
+  local ldp="$1" bin missing
+  while IFS= read -r bin; do
+    [ -n "$bin" ] || continue
+    missing=$(LD_LIBRARY_PATH="$ldp" ldd "$bin" 2>/dev/null | awk '/not found/ { print $1 }') || true
+    [ -n "$missing" ] && printf '%s\n' "$missing"
+  done < <(browser_bins)
+  return 0
+}
+
+# Best-effort soname -> Ubuntu package mapping for libs beyond the known set.
+package_for_soname() {
+  local soname="$1" cand base_short base_long
+  base_long="${soname%%.so*}"  # libasound.so.2 -> libasound
+  base_short="${soname%.so*}"  # libasound.so.2 -> libasound2
+  for cand in "$base_short" "$base_long" "${base_short}t64" "${base_long}t64"; do
+    [ -n "$cand" ] || continue
+    if apt-cache show "$cand" >/dev/null 2>&1; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+download_packages() {
+  local pkg
+  mkdir -p "$DEB_DIR"
+  for pkg in "$@"; do
+    if compgen -G "$DEB_DIR/${pkg}_*.deb" >/dev/null; then
+      continue
+    fi
+    log "downloading $pkg"
+    (cd "$DEB_DIR" && apt-get download "$pkg") >&2 ||
+      die "apt-get download $pkg failed (offline? package missing?)"
+  done
+}
+
+extract_debs() {
+  local deb
+  for deb in "$DEB_DIR"/*.deb; do
+    [ -e "$deb" ] || continue
+    dpkg -x "$deb" "$LIBROOT"
+  done
+}
+
+ensure_libs() {
+  local ldp missing resolved pkg
+  mkdir -p "$LIBROOT"
+  ldp="$(lib_path_env_value)"
+  missing="$(missing_sonames "$ldp")"
+  if [ -z "$missing" ]; then
+    log "browser shared libraries OK ($LIBROOT)"
+    return 0
+  fi
+
+  log "missing browser libraries: $(printf '%s' "$missing" | tr '\n' ' ')"
+  download_packages "${PACKAGES[@]}"
+  extract_debs
+
+  ldp="$(lib_path_env_value)"
+  missing="$(missing_sonames "$ldp")"
+  local round=0
+  while [ -n "$missing" ] && [ "$round" -lt 8 ]; do
+    round=$((round + 1))
+    resolved=()
+    while IFS= read -r soname; do
+      [ -n "$soname" ] || continue
+      if pkg="$(package_for_soname "$soname")"; then
+        resolved+=("$pkg")
+      else
+        die "no package found for missing library $soname; run: apt-file search $soname (or add the package to PACKAGES in $0)"
+      fi
+    done <<<"$missing"
+    download_packages "${resolved[@]}"
+    extract_debs
+    ldp="$(lib_path_env_value)"
+    missing="$(missing_sonames "$ldp")"
+  done
+  [ -z "$missing" ] ||
+    die "libraries still missing after extraction: $(printf '%s' "$missing" | tr '\n' ' ')"
+
+  log "browser shared libraries installed at $LIBROOT"
+}
+
+# -------------------------------------------------------------------- tools
+
+write_mcp_launcher() {
+  mkdir -p "$BINDIR"
+  cat >"$BINDIR/fm-chromium-mcp" <<'MCP_LAUNCHER'
+#!/usr/bin/env node
+/*
+ * fm-chromium-mcp - chrome-devtools-mcp launcher managed by
+ * ~/.local/bin/fm-chromium-libs.
+ *
+ * chrome-devtools-axi starts its MCP server through this file. The launcher:
+ *   1. points chrome-devtools-mcp at the Playwright Chromium so a Linux
+ *      browser is used even though no system Chrome exists, and
+ *   2. puts the user-space libraries back on LD_LIBRARY_PATH, because the
+ *      MCP client SDK only forwards a small allow-list of environment
+ *      variables to its child processes (LD_LIBRARY_PATH is not in it).
+ */
+'use strict';
+const { spawn } = require('node:child_process');
+const { existsSync, readdirSync } = require('node:fs');
+const { join } = require('node:path');
+const { homedir } = require('node:os');
+
+const home = homedir();
+const mcp =
+  process.env.FM_CHROME_DEVTOOLS_MCP_JS ||
+  join(home, '.local/share/fm-chromium/mcp/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js');
+const libDir =
+  process.env.FM_CHROMIUM_LIB_DIR || join(home, '.local/share/chromium-libs/usr/lib/x86_64-linux-gnu');
+
+function findChromium() {
+  if (process.env.FM_CHROMIUM_BIN) return process.env.FM_CHROMIUM_BIN;
+  const root = join(home, '.cache/ms-playwright');
+  if (!existsSync(root)) return undefined;
+  const candidates = readdirSync(root)
+    .filter(name => /^chromium-\d+$/.test(name))
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  for (const name of candidates) {
+    const bin = join(root, name, 'chrome-linux64', 'chrome');
+    if (existsSync(bin)) return bin;
+  }
+  return undefined;
+}
+
+if (!existsSync(mcp)) {
+  console.error(`fm-chromium-mcp: ${mcp} not found; run ~/.local/bin/fm-chromium-libs`);
+  process.exit(1);
+}
+
+const args = process.argv.slice(2);
+const has = name => args.some(arg => arg === name || arg.startsWith(`${name}=`));
+const hasShort = name => args.some(arg => arg === name || arg.startsWith(`${name}=`));
+const attachMode = has('--browserUrl') || has('--wsEndpoint');
+if (!has('--executablePath') && !hasShort('-e') && !has('--channel') && !attachMode) {
+  const chrome = findChromium();
+  if (chrome) args.push(`--executablePath=${chrome}`);
+}
+
+const env = { ...process.env };
+if (existsSync(libDir)) {
+  env.LD_LIBRARY_PATH = env.LD_LIBRARY_PATH ? `${libDir}:${env.LD_LIBRARY_PATH}` : libDir;
+}
+
+const child = spawn(process.execPath, [mcp, ...args], { stdio: 'inherit', env });
+child.on('error', error => {
+  console.error(`fm-chromium-mcp: ${error.message}`);
+  process.exit(1);
+});
+child.on('exit', (code, signal) => {
+  process.exit(code ?? (signal ? 1 : 0));
+});
+MCP_LAUNCHER
+  chmod 0755 "$BINDIR/fm-chromium-mcp"
+}
+
+write_axi_launcher() {
+  mkdir -p "$BINDIR"
+  cat >"$BINDIR/chrome-devtools-axi" <<'AXI_LAUNCHER'
+#!/usr/bin/env bash
+# chrome-devtools-axi launcher managed by ~/.local/bin/fm-chromium-libs.
+# Runs the user-space copy because the older nvm-installed one predates the
+# current chrome-devtools-mcp tool schemas.
+set -euo pipefail
+home="${HOME:?}"
+axi="${FM_CHROMIUM_AXI_JS:-$home/.local/share/fm-chromium/axi/node_modules/chrome-devtools-axi/dist/bin/chrome-devtools-axi.js}"
+node_bin="${FM_NODE_BIN:-}"
+if [ -z "$node_bin" ]; then node_bin="$(command -v node || true)"; fi
+if [ -z "$node_bin" ]; then
+  for candidate in "$home"/.nvm/versions/node/*/bin/node; do
+    if [ -x "$candidate" ]; then
+      node_bin="$candidate"
+    fi
+  done
+fi
+if [ -z "$node_bin" ]; then
+  printf 'chrome-devtools-axi: node not found; source your shell profile or set FM_NODE_BIN\n' >&2
+  exit 127
+fi
+# chrome-devtools-axi spawns its bridge with bare `node`, so make sure the
+# directory holding the interpreter is on PATH even in shells that did not
+# load nvm/conda (for example non-interactive `bash -c`).
+case ":$PATH:" in
+  *":$(dirname "$node_bin"):"*) ;;
+  *) PATH="$(dirname "$node_bin"):$PATH" ;;
+esac
+export PATH
+if [ ! -f "$axi" ]; then
+  printf 'chrome-devtools-axi: %s not found; run ~/.local/bin/fm-chromium-libs\n' "$axi" >&2
+  exit 127
+fi
+exec "$node_bin" "$axi" "$@"
+AXI_LAUNCHER
+  chmod 0755 "$BINDIR/chrome-devtools-axi"
+}
+
+ensure_tools() {
+  command -v npm >/dev/null 2>&1 || {
+    log "npm not found; skipping chrome-devtools-mcp/chrome-devtools-axi install"
+    return 0
+  }
+  if [ ! -f "$MCP_JS" ]; then
+    log "installing chrome-devtools-mcp@$MCP_VERSION under $TOOLROOT/mcp"
+    mkdir -p "$TOOLROOT/mcp"
+    npm install --prefix "$TOOLROOT/mcp" --no-audit --no-fund "chrome-devtools-mcp@$MCP_VERSION" >&2 ||
+      die "npm install chrome-devtools-mcp@$MCP_VERSION failed"
+  fi
+  if [ ! -f "$AXI_JS" ]; then
+    log "installing chrome-devtools-axi@$AXI_VERSION under $TOOLROOT/axi"
+    mkdir -p "$TOOLROOT/axi"
+    npm install --prefix "$TOOLROOT/axi" --no-audit --no-fund "chrome-devtools-axi@$AXI_VERSION" >&2 ||
+      die "npm install chrome-devtools-axi@$AXI_VERSION failed"
+  fi
+  write_mcp_launcher
+  write_axi_launcher
+  log "chrome-devtools-axi toolchain ready ($AXI_VERSION + chrome-devtools-mcp $MCP_VERSION)"
+}
+
+# ------------------------------------------------------------ profile wiring
+
+profile_block() {
+  cat <<'BLOCK'
+# >>> fm-chromium-libs wiring >>>
+# Managed by ~/.local/bin/fm-chromium-libs. Deleting this whole block undoes
+# the user-space browser-library wiring (see that script's header for the full
+# removal list).
+if [ -d "$HOME/.local/share/chromium-libs/usr/lib/x86_64-linux-gnu" ]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$HOME/.local/share/chromium-libs/usr/lib/x86_64-linux-gnu:"*) ;;
+        *) LD_LIBRARY_PATH="$HOME/.local/share/chromium-libs/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; export LD_LIBRARY_PATH ;;
+    esac
+fi
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) PATH="$HOME/.local/bin:$PATH"; export PATH ;;
+esac
+if [ -f "$HOME/.local/bin/fm-chromium-mcp" ]; then
+    CHROME_DEVTOOLS_AXI_MCP_PATH="$HOME/.local/bin/fm-chromium-mcp"; export CHROME_DEVTOOLS_AXI_MCP_PATH
+fi
+# <<< fm-chromium-libs wiring <<<
+BLOCK
+}
+
+wire_file() {
+  local file="$1" tmp
+  [ -f "$file" ] || return 0
+  tmp="$(mktemp "$file.XXXXXX")"
+  awk -v start="$MARK_START" -v end="$MARK_END" '
+    $0 == start { skip = 1; next }
+    $0 == end   { skip = 0; next }
+    !skip       { print }
+  ' "$file" >"$tmp"
+  # Drop trailing blank lines left behind by removing the old block, then append.
+  local content
+  content="$(cat "$tmp")"
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" >"$tmp"
+  else
+    : >"$tmp"
+  fi
+  if [ -s "$tmp" ]; then
+    printf '\n' >>"$tmp"
+  fi
+  profile_block >>"$tmp"
+  chmod --reference="$file" "$tmp"
+  mv "$tmp" "$file"
+  log "profile wiring updated in $file"
+}
+
+wire_profiles() {
+  wire_file "$HOME_DIR/.profile"
+  wire_file "$HOME_DIR/.bashrc"
+}
+
+check_all() {
+  local ldp missing status=0
+  ldp="$(lib_path_env_value)"
+  if [ -z "$ldp" ]; then
+    log "FAIL: no libraries installed under $LIBROOT"
+    status=1
+  else
+    missing="$(missing_sonames "$ldp")"
+    if [ -n "$missing" ]; then
+      log "FAIL: missing libraries: $(printf '%s' "$missing" | tr '\n' ' ')"
+      status=1
+    else
+      log "OK: browser shared libraries at $LIBROOT"
+    fi
+  fi
+  [ -f "$MCP_JS" ] || {
+    log "FAIL: chrome-devtools-mcp missing ($MCP_JS)"
+    status=1
+  }
+  [ -f "$AXI_JS" ] || {
+    log "FAIL: chrome-devtools-axi missing ($AXI_JS)"
+    status=1
+  }
+  [ -f "$BINDIR/fm-chromium-mcp" ] || {
+    log "FAIL: $BINDIR/fm-chromium-mcp missing"
+    status=1
+  }
+  [ -f "$BINDIR/chrome-devtools-axi" ] || {
+    log "FAIL: $BINDIR/chrome-devtools-axi missing"
+    status=1
+  }
+  if [ "$status" -eq 0 ]; then
+    log "check passed"
+  fi
+  return "$status"
+}
+
+# --------------------------------------------------------------------- main
+
+main() {
+  local mode="ensure" libs_only=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --check)
+        mode="check"
+        ;;
+      --print-env)
+        mode="print-env"
+        ;;
+      --wire)
+        mode="wire"
+        ;;
+      --libs-only)
+        libs_only=1
+        ;;
+      --refresh)
+        rm -rf "$DEB_DIR"
+        log "cleared .deb cache"
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1 (try --help)"
+        ;;
+    esac
+    shift
+  done
+
+  case "$mode" in
+    print-env)
+      lib_path_env_value
+      printf '\n'
+      return 0
+      ;;
+    check)
+      check_all
+      return $?
+      ;;
+  esac
+
+  if [ ! -d "$LIB_RUNTIME_DIR" ]; then
+    log "creating persistent library root $LIBROOT"
+  fi
+  ensure_libs
+  if [ "$libs_only" -eq 0 ]; then
+    ensure_tools
+  fi
+  if [ "$mode" = "wire" ]; then
+    wire_profiles
+  fi
+
+  log "LD_LIBRARY_PATH -> $(lib_path_env_value)"
+  log "done"
+}
+
+main "$@"

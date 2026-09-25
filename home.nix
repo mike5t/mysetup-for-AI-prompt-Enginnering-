@@ -41,6 +41,12 @@ in
   home.file.".local/bin/herdr".source =
     config.lib.file.mkOutOfStoreSymlink "/home/linuxbrew/.linuxbrew/bin/herdr";
 
+  # User-space Chromium runtime helper (WSL/Debian/Ubuntu). scripts/
+  # install-agent-tools.sh runs it to provide the shared libraries that the
+  # Playwright Chromium build needs without system-wide packages.
+  home.file.".local/bin/fm-chromium-libs".source =
+    config.lib.file.mkOutOfStoreSymlink "${dotfiles}/scripts/fm-chromium-libs";
+
   # Firstmate is a repository/distro, not a standalone executable. Keep a
   # pinned, reproducible source snapshot in the Home Manager profile while
   # leaving the live ~/github/firstmate checkout untouched.

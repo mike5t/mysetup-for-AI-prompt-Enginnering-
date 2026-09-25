@@ -26,7 +26,7 @@ The main command is:
 ./rebuild.sh
 ```
 
-That script performs three actions:
+That script performs four actions:
 
 1. `git add .` stages the current repository changes. This prepares changes
    for a possible commit, but it does **not** commit or push anything.
@@ -34,6 +34,8 @@ That script performs three actions:
    and activates the configuration for the user `miket5`.
 3. `scripts/install-pi.sh` installs the pinned Pi coding agent CLI into
    `~/.local/bin` (and does nothing when that exact version is already there).
+4. `scripts/install-agent-tools.sh` installs the pinned agent CLIs, the
+   no-mistakes gate, and the Playwright browser (also idempotent).
 
 The configuration follows this path:
 
@@ -48,6 +50,7 @@ flake.nix
 rebuild.sh
   -> runs the Home Manager switch above
   -> runs scripts/install-pi.sh to install the pinned Pi CLI
+  -> runs scripts/install-agent-tools.sh for the other agent tooling
 ```
 
 Home Manager creates a new user-environment generation when it switches. If a
@@ -95,6 +98,9 @@ If the repository is stored somewhere other than `~/.dotfiles`, update the
 | `home/.pi/agent/skills/` | Personal Pi skills stored in this repository. |
 | `home/.agents/skills/` | Skills shared by Pi and other agent harnesses. |
 | `scripts/install-pi.sh` | Installs the pinned Pi CLI into `~/.local/bin`. |
+| `scripts/install-agent-tools.sh` | Installs the pinned agent CLIs, no-mistakes, and Playwright. |
+| `scripts/fm-chromium-libs` | User-space Chromium runtime for WSL/Debian/Ubuntu. |
+| `home/.no-mistakes/config.yaml` | Seed configuration for the no-mistakes gate. |
 | `.gitignore` | Prevents temporary editor files and other unwanted files from being committed. |
 
 ## Software and shell configuration
@@ -185,8 +191,8 @@ installed:
   are stored in this repository and linked into place, so they remain editable.
 
 Some personal skills expect external commands to be present (for example the
-`no-mistakes` and `playwright-cli` CLIs). Those tools are not managed by this
-repository and must be reinstalled separately if you rely on them.
+`no-mistakes` and `playwright-cli` CLIs). `scripts/install-agent-tools.sh`
+installs them, as described in [Agent tooling](#agent-tooling-alongside-pi).
 
 ### The one manual step: the API key
 
@@ -199,6 +205,28 @@ cloning on a new machine, restore it in one of these two ways:
    login prompt on first run.
 
 Keep the key in a password manager so it survives a machine reset.
+
+## Agent tooling alongside Pi
+
+`scripts/install-agent-tools.sh` (called by `rebuild.sh`) installs and pins the
+tools that the skills rely on:
+
+- npm CLIs installed into `~/.local`: `@openai/codex`, `@playwright/cli`,
+  `chrome-devtools-axi`, `gh-axi`, `lavish-axi`, `quota-axi`, `tasks-axi`, and
+  `hardhat`.
+- The `no-mistakes` gate binary from its GitHub releases (pinned, checksum
+  verified) at `~/.no-mistakes/bin/no-mistakes`, linked into `~/.local/bin`.
+  `home/.no-mistakes/config.yaml` seeds its configuration on a fresh machine
+  without overwriting an existing one.
+- The Playwright Chromium browser, which the `playwright-cli` skill drives.
+- On Debian/Ubuntu (including WSL) `scripts/fm-chromium-libs` extracts the
+  shared libraries Chromium needs into `~/.local`, so no system-wide packages
+  or root access are required, and writes the `chrome-devtools-axi` launchers.
+
+Versions are pinned near the top of each script. To move to a newer release,
+update the version there, run `./rebuild.sh`, and commit the change. Override
+the no-mistakes version for a single run with `NO_MISTAKES_VERSION=v1.79.0
+./scripts/install-agent-tools.sh`.
 
 ## Why symbolic links are used
 

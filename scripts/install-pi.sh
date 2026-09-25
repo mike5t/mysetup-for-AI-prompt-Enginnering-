@@ -14,16 +14,16 @@ export PATH="${HOME}/.nix-profile/bin:${HOME}/.local/bin:${PATH}"
 # Check the Home Manager-managed location explicitly so a separate nvm install
 # cannot mask a missing or outdated ~/.local/bin/pi.
 pi_bin="${HOME}/.local/bin/pi"
-if [ -x "${pi_bin}" ] \
-  && [ "$("${pi_bin}" --version 2>/dev/null || true)" = "${PI_VERSION}" ]; then
-  echo "pi ${PI_VERSION} is already installed at ${pi_bin}"
-  exit 0
+if [ -x "${pi_bin}" ] &&
+	[ "$("${pi_bin}" --version 2>/dev/null || true)" = "${PI_VERSION}" ]; then
+	echo "pi ${PI_VERSION} is already installed at ${pi_bin}"
+	exit 0
 fi
 
 npm_bin="$(command -v npm || true)"
 if [ -z "${npm_bin}" ]; then
-  echo "error: npm not found. Run ./rebuild.sh first so Nix provides Node.js." >&2
-  exit 1
+	echo "error: npm not found. Run ./rebuild.sh first so Nix provides Node.js." >&2
+	exit 1
 fi
 
 echo "Installing @earendil-works/pi-coding-agent@${PI_VERSION} into ${NPM_CONFIG_PREFIX} ..."

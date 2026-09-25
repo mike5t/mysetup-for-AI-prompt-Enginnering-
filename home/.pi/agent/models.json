@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "deepseek": {
+      "modelOverrides": {
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash (deprecated id, use deepseek-flash)",
+          "input": ["text", "image"],
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cacheRead": 0.006,
+            "cacheWrite": 0
+          }
+        }
+      }
+    }
+  }
+}

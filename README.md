@@ -13,6 +13,7 @@ back up, and use on another Linux computer. The setup uses:
 - **Git** to keep a history of the configuration.
 - **Neovim, WezTerm, Zsh, and terminal tools** for day-to-day development.
 - Shared instruction files for AI coding assistants.
+- The **Pi coding agent** with its configuration, pinned version, and skills.
 
 This is configuration, not a standalone application. Running it changes the
 user's development environment; it does not create a new operating system.
@@ -25,12 +26,14 @@ The main command is:
 ./rebuild.sh
 ```
 
-That script performs two actions:
+That script performs three actions:
 
 1. `git add .` stages the current repository changes. This prepares changes
    for a possible commit, but it does **not** commit or push anything.
 2. Home Manager reads `flake.nix` and `home.nix`, installs the requested tools,
    and activates the configuration for the user `miket5`.
+3. `scripts/install-pi.sh` installs the pinned Pi coding agent CLI into
+   `~/.local/bin` (and does nothing when that exact version is already there).
 
 The configuration follows this path:
 
@@ -40,7 +43,11 @@ flake.nix
   -> loads home.nix
        -> installs command-line tools
        -> configures Zsh, fzf, direnv, and Home Manager
-       -> links Neovim, WezTerm, and AI instruction files into the home folder
+       -> links Neovim, WezTerm, Pi, and AI instruction files into the home folder
+
+rebuild.sh
+  -> runs the Home Manager switch above
+  -> runs scripts/install-pi.sh to install the pinned Pi CLI
 ```
 
 Home Manager creates a new user-environment generation when it switches. If a
@@ -63,7 +70,9 @@ cd ~/.dotfiles
 The repository is private, so GitHub access must be configured before the
 `git clone` command can work. Nix must also be installed, with flakes enabled.
 The script downloads Home Manager through Nix, so Home Manager does not need
-to be installed separately first.
+to be installed separately first. It also installs the pinned Pi coding agent
+CLI into `~/.local/bin`; see [Pi coding agent](#pi-coding-agent) below for the
+one secret that has to be restored by hand.
 
 If the repository is stored somewhere other than `~/.dotfiles`, update the
 `dotfiles` path near the top of `home.nix` before running the rebuild.
@@ -80,12 +89,19 @@ If the repository is stored somewhere other than `~/.dotfiles`, update the
 | `home/.config/wezterm` | Reserved directory for WezTerm configuration. |
 | `home/AGENTS.md` | Shared instructions for AI coding assistants. |
 | `home/agents.md` | Additional copy of the agent guidance document. |
+| `home/.pi/agent/settings.json` | Pi settings, default model, and pinned Pi packages. |
+| `home/.pi/agent/models.json` | Pi model overrides (DeepSeek model metadata). |
+| `home/.pi/agent/trust.json` | Directories Pi treats as trusted. |
+| `home/.pi/agent/skills/` | Personal Pi skills stored in this repository. |
+| `home/.agents/skills/` | Skills shared by Pi and other agent harnesses. |
+| `scripts/install-pi.sh` | Installs the pinned Pi CLI into `~/.local/bin`. |
 | `.gitignore` | Prevents temporary editor files and other unwanted files from being committed. |
 
 ## Software and shell configuration
 
 The setup installs these command-line tools:
 
+- Node.js 24 (`nodejs_24`), which provides the `npm` used to install Pi
 - Neovim and Git
 - ripgrep, fd, jq, bat, eza, and tree for searching and inspecting files
 - Starship for the shell prompt
@@ -138,7 +154,51 @@ coding tools. Home Manager links it into the home directory as:
 This means an AI assistant can use the same guidance regardless of which
 supported editor or tool is being used. Editing `home/AGENTS.md` changes the
 source file in the repository; run the rebuild if the link itself needs to be
-recreated.
+recreated. Pi reads the same guidance through `~/.pi/agent/AGENTS.md`, which is
+linked to `home/agents.md`.
+
+## Pi coding agent
+
+Pi is installed from npm at a pinned version. `rebuild.sh` calls
+`scripts/install-pi.sh`, which installs
+`@earendil-works/pi-coding-agent@0.83.0` into `~/.local` using the Node.js from
+the Nix profile. The script is idempotent: it skips the install when the
+requested version is already on `PATH`.
+
+Configuration lives in `home/.pi/agent/` and is linked into `~/.pi/agent/`:
+
+- `settings.json` selects DeepSeek as the default provider, pins the
+  `deepseek-flash` model, and declares the `pi-image-view` package. Pi installs
+  missing packages automatically on startup.
+- `models.json` supplies the DeepSeek model overrides.
+- `trust.json` marks `/home/miket5` as trusted.
+
+### Skills
+
+Pi loads skills from `~/.pi/agent/skills/` and `~/.agents/skills/` by default,
+so no `skills` entry is needed in `settings.json`. Two kinds of skills are
+installed:
+
+- **Anthropic's public skills** are pinned as the `anthropics-skills` flake
+  input and linked read-only to `~/.pi/agent/skills/anthropic`.
+- **Personal skills** (`planning-with-files`, `no-mistakes`, `playwright-cli`)
+  are stored in this repository and linked into place, so they remain editable.
+
+Some personal skills expect external commands to be present (for example the
+`no-mistakes` and `playwright-cli` CLIs). Those tools are not managed by this
+repository and must be reinstalled separately if you rely on them.
+
+### The one manual step: the API key
+
+The DeepSeek API key is a secret and is intentionally **not** committed. After
+cloning on a new machine, restore it in one of these two ways:
+
+1. Put the credentials file at `~/.config/pi/auth.json` (outside this
+   repository). The next rebuild links it to `~/.pi/agent/auth.json`.
+2. Export `DEEPSEEK_API_KEY` in your shell, or enter the key through the Pi
+   login prompt on first run.
+
+Keep the key in a password manager so it survives a machine reset.
 
 ## Why symbolic links are used
 
@@ -193,7 +253,8 @@ git push
 
 Remember that `rebuild.sh` stages all non-ignored changes. Review the staged
 diff so that passwords, API keys, tokens, or other private information are not
-committed. Secrets should be kept outside this repository.
+committed. Secrets should be kept outside this repository. Pi's credentials
+file (`home/.pi/agent/auth.json`) is listed in `.gitignore` as an extra guard.
 
 ## Troubleshooting
 

@@ -11,3 +11,8 @@
   If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along the way.
 - Apply that same high standard to engineering excellence: lint, test failures, and test flakiness.
   If you see one, even if it is not caused by what you are working on right now, still get it fixed.
+
+## Model naming
+
+- The current model is `deepseek-flash` (provider `deepseek`). That is the canonical id, and `settings.json` pins it as the default.
+- `deepseek-v4-flash` is only a legacy alias for the same model. The DeepSeek API still resolves it to `deepseek-flash` but no longer lists it, and Pi's bundled catalog still shows it as a separate entry. Treat it as deprecated and do not select it.

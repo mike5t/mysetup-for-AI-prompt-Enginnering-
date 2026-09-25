@@ -1,1 +1,5 @@
 .home.nix.sw*
+
+# Secrets: Pi API credentials must never be committed.
+home/.pi/agent/auth.json
+/result
